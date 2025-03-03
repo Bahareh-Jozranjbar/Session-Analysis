@@ -1,0 +1,172 @@
+---
+title: "Session Analysis"
+author: "Bahareh Jozranjbar"
+output: word_document
+---
+
+## Step 1: Load and Prepare the Data
+
+```{r}
+# Install necessary packages if not installed
+# install.packages("ouladFormat")
+# install.packages("dplyr")
+# install.packages("ggplot2")
+# install.packages("ggthemes")
+# install.packages("cluster")
+# install.packages("pROC")
+# install.packages("factoextra")
+# install.packages("tidyr")
+# install.packages("forcats")
+
+library(ouladFormat)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(cluster)
+library(pROC)
+library(factoextra)
+library(tidyr)
+library(forcats)
+
+# Load dataset
+download.file("https://analyse.kmi.open.ac.uk/resources/documents/mashupData.RData",
+              destfile = "./mashupData.RData",
+              mode = "wb", quiet = TRUE)
+load("mashupData.RData")
+```
+
+## Step 2: Analyze Session Patterns
+
+### 1. Detect Hesitation (Time Between Interactions)
+```{r}
+session_data <- studentVle %>%
+  arrange(id_student, date) %>%
+  group_by(id_student) %>%
+  mutate(time_gap = date - lag(date, default = first(date)),
+         hesitation = ifelse(time_gap > 5, 1, 0)) %>%
+  ungroup()
+
+hesitation_summary <- session_data %>%
+  group_by(id_student) %>%
+  summarise(total_hesitations = sum(hesitation, na.rm = TRUE))
+
+# Visualization
+p1 <- ggplot(hesitation_summary, aes(x = total_hesitations)) +
+  geom_histogram(binwidth = 1, fill = "#457B9D", alpha = 0.8) +
+  labs(title = "Distribution of Hesitations Per User",
+       x = "Total Hesitations",
+       y = "Number of Users") +
+  theme_minimal()
+
+ggsave("hesitation_distribution.png", p1, bg = "transparent", width = 6, height = 4, dpi = 300)
+p1
+```
+
+### 2. Detect Rage Clicks (Rapid Clicks on Same Area)
+```{r}
+session_data <- session_data %>%
+  arrange(id_student, date) %>%
+  group_by(id_student) %>%
+  mutate(click_interval = date - lag(date, default = first(date)),
+         rage_click = ifelse(click_interval < 1, 1, 0)) %>%
+  ungroup()
+
+rage_click_summary <- session_data %>%
+  group_by(id_student) %>%
+  summarise(total_rage_clicks = sum(rage_click, na.rm = TRUE))
+
+# Visualization
+p2 <- ggplot(rage_click_summary, aes(x = total_rage_clicks)) +
+  geom_histogram(binwidth = 10, fill = "#E63946", alpha = 0.8) +
+  labs(title = "Distribution of Rage Clicks",
+       x = "Total Rage Clicks",
+       y = "Number of Users") +
+  theme_minimal()
+
+ggsave("rage_click_distribution.png", p2, bg = "transparent", width = 6, height = 4, dpi = 300)
+p2
+```
+
+### 3. Detect Task Abandonment Using Engagement Drop-Off
+```{r}
+# Calculate a  meaningful abandonment threshold (lower quartile)
+quantile_threshold <- quantile(session_last_dates$last_session_date, probs = 0.25, na.rm = TRUE)
+
+abandonment_data <- session_last_dates %>%
+  mutate(task_abandoned = ifelse(last_session_date <= quantile_threshold, "Abandoned", "Active"))
+
+# Visualization with better threshold
+p3 <- ggplot(abandonment_data, aes(x = factor(task_abandoned), fill = task_abandoned)) +
+  geom_bar(alpha = 0.8, show.legend = FALSE) +
+  scale_fill_manual(values = c("Abandoned" = "#E63946", "Active" = "#2A9D8F")) +
+  labs(title = "Task Abandonment Rates",
+       x = "Task Status",
+       y = "Number of Users") +
+  theme_minimal(base_size = 16)
+
+ggsave("task_abandonment_refined.png", p3, bg = "transparent", width = 6, height = 4, dpi = 300)
+p3
+
+
+```
+
+### 4. Dwell Time Analysis (User Engagement Duration)
+```{r}
+dwell_time_summary <- session_data %>%
+  group_by(id_student) %>%
+  summarise(avg_dwell_time = mean(date - lag(date, default = first(date)), na.rm = TRUE))
+
+# Visualization
+p4 <- ggplot(dwell_time_summary, aes(x = avg_dwell_time)) +
+  geom_histogram(binwidth = 1, fill = "#2A9D8F", alpha = 0.8) +
+  labs(title = "Distribution of Dwell Time Per User",
+       x = "Average Dwell Time (Seconds)",
+       y = "Number of Users") +
+  theme_minimal()
+
+ggsave("dwell_time_distribution.png", p4, bg = "transparent", width = 6, height = 4, dpi = 300)
+p4
+```
+
+### 5. Identify and Cluster User Behavior
+```{r}
+set.seed(123)
+kmeans_result <- kmeans(scale(dwell_time_summary$avg_dwell_time), centers = 3)
+dwell_time_summary$cluster <- as.factor(kmeans_result$cluster)
+
+# Visualization
+p5 <- ggplot(dwell_time_summary, aes(x = avg_dwell_time, fill = cluster)) +
+  geom_histogram(binwidth = 1, alpha = 0.8) +
+  labs(title = "User Clustering Based on Dwell Time",
+       x = "Average Dwell Time",
+       y = "Number of Users") +
+  theme_minimal()
+
+ggsave("user_clustering.png", p5, bg = "transparent", width = 6, height = 4, dpi = 300)
+p5
+```
+
+### 6. Predict Dropout Using Logistic Regression
+```{r}
+# Create dropout data from studentRegistration
+dropout_event_data <- studentRegistration %>%
+  mutate(dropout_event = ifelse(!is.na(date_unregistration), 1, 0),
+         time_to_dropout = date_unregistration - date_registration) %>%
+  select(id_student, dropout_event, time_to_dropout)
+
+dropout_analysis <- dropout_event_data %>%
+  left_join(hesitation_summary, by = "id_student") %>%
+  left_join(rage_click_summary, by = "id_student") %>%
+  left_join(abandonment_data, by = "id_student") %>%
+  left_join(dwell_time_summary, by = "id_student") %>%
+  mutate(across(where(is.numeric), ~ replace_na(., 0)))
+
+logit_model_improved <- glm(
+  dropout_event ~ time_to_dropout + total_hesitations + total_rage_clicks + task_abandoned + avg_dwell_time,
+  data = dropout_analysis, 
+  family = binomial
+)
+summary(logit_model_improved)
+```
+
+
